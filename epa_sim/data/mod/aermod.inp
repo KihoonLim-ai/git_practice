@@ -1,0 +1,52 @@
+CO STARTING
+   TITLEONE  Ulsan Industrial Simulation
+   TITLETWO  Drone Altitude (100m) Analysis
+   
+   MODELOPT  DFAULT CONC ELEV
+
+   FLAGPOLE  100.0
+   
+   AVERTIME  1  24  PERIOD
+
+   POLLUTID  OTHER                 
+   RUNORNOT  RUN
+   ERRORFIL  aermod.err
+
+   DEBUGOPT METEOR
+CO FINISHED
+
+SO STARTING
+   INCLUDED /home/jhlee/epa_sim/data/ter/ulsan_source_elev.src
+
+   SRCPARAM  STACK01   2.0   30.0  353.0  10.0  1.0
+   SRCPARAM  STACK02  15.0   80.0  393.0  15.0  2.5
+   SRCPARAM  STACK03   5.0   50.0  373.0  12.0  1.5
+   SRCPARAM  STACK04   5.0   50.0  373.0  12.0  1.5
+   SRCPARAM  STACK05  15.0   80.0  393.0  15.0  2.5
+   SRCPARAM  STACK06   2.0   30.0  353.0  10.0  1.0
+   SRCPARAM  STACK07   5.0   50.0  373.0  12.0  1.5
+   SRCPARAM  STACK08   5.0   50.0  373.0  12.0  1.5
+   SRCPARAM  STACK09  15.0   80.0  393.0  15.0  2.5
+   SRCPARAM  STACK10   2.0   30.0  353.0  10.0  1.0
+
+   SRCGROUP  ALL
+SO FINISHED
+
+RE STARTING
+   INCLUDED /home/jhlee/epa_sim/data/ter/ulsan_terrain.rou
+RE FINISHED
+
+ME STARTING
+   SURFFILE  /home/jhlee/epa_sim/data/met/ulsan_2024.sfc
+   PROFFILE  /home/jhlee/epa_sim/data/met/ulsan_2024.pfl
+   SURFDATA  471520  2024
+   UAIRDATA  47138   2024
+   SITEDATA  471520  2024
+   PROFBASE  56.0 METERS
+ME FINISHED
+
+OU STARTING
+   RECTABLE  ALLAVE  FIRST
+   MAXTABLE  ALLAVE  50
+   POSTFILE  1       ALL  PLOT  /home/jhlee/epa_sim/results/alt/ulsan_conc_1hr_100m.plt
+OU FINISHED
