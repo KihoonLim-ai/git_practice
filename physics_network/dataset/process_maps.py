@@ -1,9 +1,8 @@
-# process_maps.py
 import os
 import numpy as np
 import pandas as pd
 from config_param import ConfigParam as Config
-from physics_utils import xy_to_grid
+from dataset.physics_utils import xy_to_grid
 
 def parse_locations(file_path, sources_dict):
     if not os.path.exists(file_path): return
@@ -37,7 +36,7 @@ def run():
             with open(rou_path, 'r', encoding='utf-8', errors='ignore') as f:
                 for line in f:
                     parts = line.split()
-                    if 'ELEV' in parts: # ELEV 키워드만 찾음
+                    if 'ELEV' in parts:
                         try:
                             elev_idx = parts.index('ELEV')
                             row_id = int(parts[elev_idx + 1])
@@ -49,7 +48,6 @@ def run():
                             row_data[row_id].extend(vals)
                         except: continue
             
-            # 그리드 채우기
             for r_id, vals in row_data.items():
                 py_row = r_id - 1
                 if 0 <= py_row < Config.NY:
@@ -58,9 +56,10 @@ def run():
                     points_filled += len(valid_vals)
             
             if points_filled > 0:
-                t_max_val = t_grid.max() # [중요] 최대값 저장
+                t_max_val = t_grid.max()
                 print(f"   > Max Terrain Height: {t_max_val:.2f} m")
-                if t_max_val > 0: t_grid /= t_max_val # 0~1 정규화
+                # [지형 정규화] 0~1
+                if t_max_val > 0: t_grid /= t_max_val 
                 print(f"   -> Terrain processed ({points_filled} points).")
                 
         except Exception as e:
@@ -74,9 +73,9 @@ def run():
     loc_path = os.path.join(Config.RAW_DIR, Config.FILE_SRC_LOC)
     sources = {}
     
-    parse_locations(loc_path, sources) # 위치 로드
+    parse_locations(loc_path, sources)
     
-    if os.path.exists(inp_path): # 파라미터 로드
+    if os.path.exists(inp_path):
         with open(inp_path, 'r', encoding='utf-8', errors='ignore') as f:
             for line in f:
                 parts = line.split()
@@ -99,15 +98,34 @@ def run():
                 q_grid[idx] += data.get('q', 1.0)
                 h_grid[idx] = max(h_grid[idx], data.get('h', 10.0))
                 cnt += 1
-    print(f"   -> Mapped {cnt} sources.")
     
-    # [수정] terrain_max 함께 저장
+    # -----------------------------------------------------------
+    # [추가됨] 오염원 데이터 정규화
+    # -----------------------------------------------------------
+    print(f"   -> Mapped {cnt} sources.")
+
+    # 1) 배출량(Q): 편차가 크므로 Log Scale 적용 (농도 데이터와 전략 통일)
+    # log1p를 적용하여 0인 값은 0으로 유지
+    q_grid = np.log1p(q_grid) 
+    print("   -> Applied Log1p scaling to Source Emission (Q)")
+
+    # 2) 굴뚝 높이(H): 도메인 전체 높이(MAX_Z)로 나누어 0~1로 맞춤
+    # Config에 MAX_Z가 없다면 대략적인 최대값(예: 200m) 혹은 t_max_val 사용
+    # 여기서는 Config.NZ * Config.DZ 를 도메인 천장으로 가정
+    domain_max_z = Config.MAX_Z
+    if domain_max_z > 0:
+        h_grid /= domain_max_z
+    print(f"   -> Applied MinMax scaling to Source Height (H) using max_z={domain_max_z}m")
+    # -----------------------------------------------------------
+
     save_path = os.path.join(Config.PROCESSED_DIR, Config.SAVE_MAPS)
     np.savez_compressed(save_path, 
                         terrain=t_grid, 
                         source_q=q_grid, 
                         source_h=h_grid,
-                        terrain_max=t_max_val)
+                        terrain_max=t_max_val) # 복원용
+    
+    print(f"   >> Saved maps to {save_path}")
 
 if __name__ == "__main__":
     run()
