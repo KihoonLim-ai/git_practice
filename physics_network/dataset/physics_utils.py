@@ -1,5 +1,5 @@
 import numpy as np
-from dataset.config_param import ConfigParam as Config
+from config_param import ConfigParam as Config
 
 def xy_to_grid(x, y):
     """ 

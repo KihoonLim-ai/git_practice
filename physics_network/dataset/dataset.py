@@ -2,7 +2,7 @@ import os
 import torch
 import numpy as np
 from torch.utils.data import Dataset
-from dataset.config_param import ConfigParam as Config
+from config_param import ConfigParam as Config
 
 # 사용자가 업로드한 physics_utils 활용
 from dataset.physics_utils import calc_wind_profile_power_law

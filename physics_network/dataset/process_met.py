@@ -1,10 +1,10 @@
 import os
 import numpy as np
 import pandas as pd
-from dataset.config_param import ConfigParam as Config
+from config_param import ConfigParam as Config
 
 def run():
-    print("\n[Step 2] Processing Met Data...")
+    print("\n[Step 2] Processing Met Data (With Interpolation)...")
     path = os.path.join(Config.RAW_DIR, Config.FILE_SFC)
     try:
         df_raw = pd.read_csv(path, sep=r'\s+', skiprows=1, header=None)
@@ -21,12 +21,32 @@ def run():
     df = df_raw[valid].copy()
     df.columns = [col_map[c] for c in valid]
     
-    # 1. 이상치 제거 (물리적으로 불가능한 값)
-    df = df[(df['ws'] < 100.0) & (df['L'] > -90000.0)]
+    # -----------------------------------------------------------
+    # [수정 1] 이상치 처리 방식 변경: 삭제(Drop) -> 보간(Interpolate)
+    # -----------------------------------------------------------
+    print(f"   Original Entries: {len(df)}")
+
+    # 1. 이상치(결측치)를 NaN으로 마킹
+    # AERMET에서 ws >= 100, L <= -90000 은 보통 결측을 의미함
+    df.loc[df['ws'] >= 100.0, 'ws'] = np.nan
+    df.loc[df['L'] <= -90000.0, 'L'] = np.nan
     
-    # [수정] 월 필터링 제거 (전체 데이터 사용)
+    # 2. 선형 보간 (Linear Interpolation) 적용
+    # limit=4: 연속된 결측이 4시간 이하라면 채워줌. 그 이상은 너무 길어서 신뢰할 수 없으므로 둠.
+    df['ws'] = df['ws'].interpolate(method='linear', limit=4)
+    df['L']  = df['L'].interpolate(method='linear', limit=4)
+    df['wd'] = df['wd'].interpolate(method='linear', limit=4) 
+    
+    # 3. 보간으로도 못 채운(너무 긴 결측 구간) 데이터만 삭제
+    df = df.dropna().reset_index(drop=True)
+    
+    # [수정 2] 월 필터링 로직 삭제 (주석 처리)
+    # 8,000시간 전체 데이터를 쓰기로 했으므로 필터링 없이 통과시킴
     # df = df[df['month'].isin(Config.TARGET_MONTHS)].reset_index(drop=True) 
-    print(f"   -> Valid Data (All Seasons): {len(df)} timestamps")
+    
+    print(f"   -> Valid Data (After Interpolation): {len(df)} timestamps")
+    
+    # -----------------------------------------------------------
     
     # 2. 벡터 변환 (Wind Speed/Dir -> U, V)
     met_data = []
@@ -55,7 +75,7 @@ def run():
     save_path = os.path.join(Config.PROCESSED_DIR, Config.SAVE_MET)
     np.savez_compressed(
         save_path, 
-        met=met_arr,       # Raw 데이터 (dataset.py에서 나눌 예정)
+        met=met_arr,       # Raw 데이터
         max_uv=max_uv,     # 정규화 상수
         max_L=max_L        # 정규화 상수
     )

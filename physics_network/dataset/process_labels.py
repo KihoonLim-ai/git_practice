@@ -2,8 +2,8 @@ import os
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from dataset.config_param import ConfigParam as Config
-from dataset.physics_utils import xy_to_grid
+from config_param import ConfigParam as Config
+from physics_utils import xy_to_grid
 
 def run(met_df):
     if met_df is None or len(met_df) == 0: return

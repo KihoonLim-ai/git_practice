@@ -20,9 +20,9 @@ class ConfigParam:
     # ==========================================
     # 2. 경로 및 파일 관리
     # ==========================================
-    RAW_DIR = '/home/jhlee/epa_sim/data'           # 원본 데이터 폴더
+    RAW_DIR = '/home/jhlee/kari-onestop-uas/epa_sim/data'           # 원본 데이터 폴더
     PROCESSED_DIR = '/home/jhlee/kari-onestop-uas/physics_network/processed_data' # 결과 저장 폴더
-    PLT_DIR_NAME = '/home/jhlee/epa_sim/data/conc'             # raw_data/plt (PLT 파일들 모아둔 곳)
+    PLT_DIR_NAME = '/home/jhlee/aermod/projects/ulsan_test/result/test2'             # raw_data/plt (PLT 파일들 모아둔 곳)
     
     # 원본 파일명 (사용자 파일명과 일치해야 함)
     FILE_ROU = 'ter/ulsan_terrain.rou'         # 지형

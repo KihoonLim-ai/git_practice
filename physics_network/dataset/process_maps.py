@@ -2,7 +2,7 @@ import os
 import numpy as np
 import pandas as pd
 from config_param import ConfigParam as Config
-from dataset.physics_utils import xy_to_grid
+from physics_utils import xy_to_grid
 
 def parse_locations(file_path, sources_dict):
     if not os.path.exists(file_path): return
