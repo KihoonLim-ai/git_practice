@@ -1,7 +1,7 @@
 import os
 import numpy as np
 import pandas as pd
-from config_param import ConfigParam as Config
+from dataset.config_param import ConfigParam as Config
 
 def run():
     print("\n[Step 2] Processing Met Data (With Interpolation)...")
@@ -71,13 +71,23 @@ def run():
     print(f"   -> Max Wind Speed (Component): {max_uv:.4f} m/s")
     print(f"   -> Max Monin-Obukhov Length: {max_L:.4f} m")
 
+    # -----------------------------------------------------------
+    # [수정] 정규화 적용 (Normalization)
+    # 저장하기 전에 미리 나눠서 -1 ~ 1 사이로 만듭니다.
+    # -----------------------------------------------------------
+    met_arr[:, 0] = met_arr[:, 0] / max_uv  # U 성분 정규화
+    met_arr[:, 1] = met_arr[:, 1] / max_uv  # V 성분 정규화
+    met_arr[:, 2] = met_arr[:, 2] / max_L   # L 성분 정규화
+    
+    print("   -> Applied Normalization (Range: -1.0 ~ 1.0)")
+
     # 4. 저장 (데이터 + 통계)
     save_path = os.path.join(Config.PROCESSED_DIR, Config.SAVE_MET)
     np.savez_compressed(
         save_path, 
-        met=met_arr,       # Raw 데이터
-        max_uv=max_uv,     # 정규화 상수
-        max_L=max_L        # 정규화 상수
+        met=met_arr,       # 이제 정규화된 데이터가 저장됨
+        max_uv=max_uv,     # 복원을 위해 스케일 값은 계속 저장
+        max_L=max_L        
     )
     print(f"   >> Saved met data to {save_path}")
     

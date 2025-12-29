@@ -1,139 +1,152 @@
-import torch
+import os
+import sys
 import numpy as np
-from torch.utils.data import DataLoader
-from dataset.dataset import get_time_split_datasets
+import matplotlib.pyplot as plt
+
+# 프로젝트 루트 경로 설정
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.append(parent_dir)
+
 from dataset.config_param import ConfigParam as Config
 
-def check_dataset():
-    print("=== Dataset Integrity Check Started (Updated for ST-Transformer) ===\n")
-
-    # 1. 데이터셋 로드 테스트 (Helper Function 사용)
-    print("--- [1] Loading Dataset ---")
+def check_normalization():
+    print("=== Dataset Integrity & Normalization Check ===\n")
+    p_dir = Config.PROCESSED_DIR
+    
+    # ---------------------------------------------------------
+    # 1. Input Maps (Terrain, Source)
+    # ---------------------------------------------------------
+    print(f"1. Loading {Config.SAVE_MAPS} ...")
     try:
-        # seq_len=30, pred_step=5 설정으로 로드
-        train_ds, val_ds, _ = get_time_split_datasets(seq_len=30, pred_step=5)
-        print(f"✅ Train Dataset loaded. Total samples: {len(train_ds)}")
-        print(f"✅ Val Dataset loaded.   Total samples: {len(val_ds)}")
+        d_maps = np.load(os.path.join(p_dir, Config.SAVE_MAPS))
+        terrain = d_maps['terrain']
+        source = d_maps['source_q']
+        t_max = float(d_maps['terrain_max'])
         
-        # 테스트는 Train Dataset으로 진행
-        ds = train_ds
+        print(f"   - Terrain Shape: {terrain.shape}")
+        
+        # [Norm Check]
+        print(f"   [Normalized Stats]")
+        print(f"     > Range: {terrain.min():.4f} ~ {terrain.max():.4f}")
+        is_valid = (terrain.min() >= 0.0) and (terrain.max() <= 1.0)
+        print(f"     > 0~1 Check: {'✅ PASS' if is_valid else '❌ WARNING'}")
+        
+        # [Physical Check]
+        print(f"   [Physical Stats]")
+        print(f"     > Max Height: {t_max:.2f} m")
+        print(f"     > Max Source (Log): {source.max():.4f}\n")
+        
     except Exception as e:
-        print(f"❌ Dataset initialization failed: {e}")
+        print(f"❌ Error loading maps: {e}")
         return
 
-    # 2. 단일 샘플 형상(Shape) 검증
-    print("\n--- [2] Single Sample Shape Check ---")
-    
+    # ---------------------------------------------------------
+    # 2. Meteorology (수정됨)
+    # ---------------------------------------------------------
+    print(f"2. Loading {Config.SAVE_MET} ...")
     try:
-        # ctx, met_seq, coords, wind, conc
-        data = ds[0]
-        ctx, met_seq, coords, wind, conc = data
+        d_met = np.load(os.path.join(p_dir, Config.SAVE_MET))
+        met_norm = d_met['met'] # 정규화된 데이터 (-1 ~ 1)
+        
+        # [수정] 스케일링 상수 로드
+        max_uv = float(d_met['max_uv'])
+        max_L = float(d_met['max_L'])
+        
+        print(f"   - Met Data Shape: {met_norm.shape}")
+        
+        # [Norm Check]
+        print(f"   [Normalized Stats] (Expect -1.0 ~ 1.0)")
+        u_min, u_max = met_norm[:, 0].min(), met_norm[:, 0].max()
+        v_min, v_max = met_norm[:, 1].min(), met_norm[:, 1].max()
+        print(f"     > U Range: {u_min:.4f} ~ {u_max:.4f}")
+        print(f"     > V Range: {v_min:.4f} ~ {v_max:.4f}")
+        
+        if (abs(u_min) <= 1.0 and abs(u_max) <= 1.0):
+            print("     -> ✅ Range Check Passed.")
+        else:
+            print("     -> ⚠️ Warning: Values exceed [-1, 1].")
+
+        # [Physical Check] - 복원 수행
+        print(f"   [Physical Stats] (Restored using max_uv={max_uv:.2f})")
+        u_phys = met_norm[:, 0] * max_uv
+        v_phys = met_norm[:, 1] * max_uv
+        print(f"     > Real U Range: {u_phys.min():.2f} ~ {u_phys.max():.2f} m/s")
+        print(f"     > Real V Range: {v_phys.min():.2f} ~ {v_phys.max():.2f} m/s")
+        print("")
+
     except Exception as e:
-        print(f"❌ __getitem__ failed: {e}")
+        print(f"❌ Error loading met: {e}")
         return
 
-    # 예상되는 차원 계산
-    n_points = Config.NX * Config.NY * Config.NZ 
-    print(f"Expected Grid Points: {n_points} ({Config.NX}x{Config.NY}x{Config.NZ})")
-    
-    # --- Shape 출력 및 검증 ---
-    
-    # 1. Context (Map): (3, 45, 45) -> Terrain, Q, H
-    print(f"1. Context Map       : {tuple(ctx.shape)} \t-> Expected: (3, {Config.NY}, {Config.NX})")
-    if ctx.shape[0] != 3: print("   ⚠️ Warning: Context channels mismatch!")
-
-    # 2. Met Sequence (Transformer Input): (Seq, 3) -> (30, 3)
-    print(f"2. Met Sequence      : {tuple(met_seq.shape)} \t-> Expected: (30, 3)")
-    if met_seq.shape[0] != 30: print("   ⚠️ Warning: Sequence length mismatch!")
-
-    # 3. Coordinates (Trunk Input): (N, 4) -> x, y, z, t
-    print(f"3. Coordinates (4D)  : {tuple(coords.shape)} \t-> Expected: ({n_points}, 4)")
-    if coords.shape[1] != 4: print("   ❌ Error: Coordinates must be 4D (x,y,z,t)!")
-
-    # 4. Wind Label: (N, 3) -> u, v, w
-    print(f"4. Wind GT (u,v,w)   : {tuple(wind.shape)} \t-> Expected: ({n_points}, 3)")
-
-    # 5. Conc Label: (N, 1) -> concentration
-    print(f"5. Conc GT           : {tuple(conc.shape)} \t-> Expected: ({n_points}, 1)")
-
-
-    # 3. 배치 로딩 및 값 유효성(Sanity) 검증
-    print("\n--- [3] Batch Loading & Value Sanity Check ---")
-    batch_size = 4
-    dl = DataLoader(ds, batch_size=batch_size, shuffle=True)
-    
+    # ---------------------------------------------------------
+    # 3. Labels (Concentration)
+    # ---------------------------------------------------------
+    print(f"3. Loading {Config.SAVE_LBL} ...")
     try:
-        batch = next(iter(dl))
-        b_ctx, b_met, b_coords, b_wind, b_conc = batch
+        d_lbl = np.load(os.path.join(p_dir, Config.SAVE_LBL))
+        conc_z = d_lbl['conc'] # Z-score Normalized
+        mean_stat = float(d_lbl['mean_stat'])
+        std_stat = float(d_lbl['std_stat'])
         
-        print(f"✅ Batch loading successful (Batch size: {batch_size})")
+        print(f"   - Conc Shape: {conc_z.shape}")
         
-        # NaN / Inf 체크
-        tensors = {
-            "Context": b_ctx, "Met_Seq": b_met, 
-            "Coords": b_coords, "Wind_GT": b_wind, "Conc_GT": b_conc
-        }
+        # [Norm Check]
+        curr_mean = np.mean(conc_z)
+        curr_std = np.std(conc_z)
         
-        all_good = True
-        for name, t in tensors.items():
-            if torch.isnan(t).any():
-                print(f"❌ [FAIL] {name} contains NaN values!")
-                all_good = False
-            if torch.isinf(t).any():
-                print(f"❌ [FAIL] {name} contains Inf values!")
-                all_good = False
-                
-        if all_good:
-            print("✅ No NaN or Inf values found.")
-            
-        # --- 핵심 검증 포인트 ---
+        print(f"   [Normalized Stats] (Z-Score)")
+        print(f"     > Mean: {curr_mean:.6f} (Target: 0.0)")
+        print(f"     > Std : {curr_std:.6f}  (Target: 1.0)")
         
-        # A. 농도 데이터 정규화 확인 (Z-score)
-        # 음수 값이 존재해야 정상입니다.
-        c_min = b_conc.min().item()
-        c_max = b_conc.max().item()
-        c_mean = b_conc.mean().item()
-        print(f"\n[Check A] Concentration Normalization (Log + Z-score)")
-        print(f"   > Min: {c_min:.4f}, Max: {c_max:.4f}, Mean: {c_mean:.4f}")
-        if c_min < 0:
-            print("   ✅ Valid: Negative values found (Standardization applied).")
+        if abs(curr_mean) < 0.1 and abs(curr_std - 1.0) < 0.1:
+            print("     -> ✅ Normalization Distribution Correct.")
         else:
-            print("   ⚠️ Warning: All values are positive. Check process_labels.py!")
+            print("     -> ⚠️ Warning: Distribution deviation detected.")
 
-        # B. 기상 시계열 정규화 확인
-        # 0~1 사이 혹은 그 근처값이어야 함
-        m_max = b_met.max().item()
-        print(f"\n[Check B] Met Sequence Normalization")
-        print(f"   > Max value in Met Seq: {m_max:.4f}")
-        if m_max > 10.0:
-            print("   ⚠️ Warning: Met values seem too large (>10). Check process_met.py!")
-        else:
-            print("   ✅ Met values look normalized.")
-
-        # C. 4D 좌표 확인 (Time channel)
-        # 현재 t=0으로 설정했으므로 4번째 채널은 모두 0이어야 함
-        t_vals = b_coords[:, :, 3] # (B, N)
-        if torch.all(t_vals == 0):
-             print("\n[Check C] Time Channel (4th dim)")
-             print("   ✅ Valid: All time coordinates are 0.0 (Current prediction).")
-        else:
-             print("\n[Check C] Time Channel (4th dim)")
-             print("   ⚠️ Warning: Non-zero time values found (Did you intend future prediction?).")
-
-        # D. 수직풍(W) 존재 여부
-        w_values = b_wind[:, :, 2]
-        max_w = torch.max(torch.abs(w_values)).item()
-        print(f"\n[Check D] Vertical Wind (W)")
-        print(f"   > Max |W|: {max_w:.6f}")
-        if max_w > 1e-6:
-            print("   ✅ W component is active.")
-        else:
-            print("   ⚠️ Warning: W component is zero (Check Slope calculation).")
+        # [Physical Check]
+        print(f"   [Physical Stats]")
+        # 샘플로 Max 값만 복원해서 확인
+        max_z = np.max(conc_z)
+        # 1) Z-score 역변환 -> 2) Log 역변환(expm1)
+        max_phys = np.expm1(max_z * std_stat + mean_stat)
+        print(f"     > Max Concentration: {max_phys:.4f} ppm (Restored)")
 
     except Exception as e:
-        print(f"❌ Batch check failed: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ Error loading labels: {e}")
+        return
+
+    # ---------------------------------------------------------
+    # 4. 시각화 (히스토그램)
+    # ---------------------------------------------------------
+    print("\n4. Generating Distribution Plots...")
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    
+    # 1) Terrain (Normalized)
+    axes[0].hist(terrain.flatten(), bins=50, color='green', alpha=0.7)
+    axes[0].set_title('Terrain (Normalized 0~1)')
+    axes[0].set_xlabel('Norm Height')
+    
+    # 2) Wind Speed (Physical Value로 표시!)
+    # 사람이 보기엔 m/s가 편하므로 복원된 값으로 그림
+    axes[1].hist(u_phys, bins=50, alpha=0.5, label='U (m/s)', color='blue')
+    axes[1].hist(v_phys, bins=50, alpha=0.5, label='V (m/s)', color='orange')
+    axes[1].set_title(f'Wind Speed (Physical m/s)\nScale Factor={max_uv:.2f}')
+    axes[1].set_xlabel('Speed (m/s)')
+    axes[1].legend()
+    
+    # 3) Concentration (Normalized Z-Score)
+    # 학습 분포 확인용이므로 Z-score 그대로 그림
+    axes[2].hist(conc_z.flatten(), bins=100, color='purple', alpha=0.7, range=(-3, 5))
+    axes[2].set_title('Concentration (Z-Score Input)')
+    axes[2].set_xlabel('Sigma ($\sigma$)')
+    axes[2].axvline(0, color='red', linestyle='--', label='Mean')
+    axes[2].legend()
+
+    plt.tight_layout()
+    plt.savefig('check_dataset_dist.png')
+    print("✅ Distribution plot saved to: check_dataset_dist.png")
+    plt.show()
 
 if __name__ == "__main__":
-    check_dataset()
+    check_normalization()

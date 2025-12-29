@@ -1,8 +1,8 @@
 # main.py
-from config_param import ConfigParam as Config
-from process_maps import run as run_maps
-from process_met import run as run_met
-from process_labels import run as run_labels
+from dataset.config_param import ConfigParam as Config
+from dataset.process_maps import run as run_maps
+from dataset.process_met import run as run_met
+from dataset.process_labels import run as run_labels
 
 def main():
     # 폴더 생성

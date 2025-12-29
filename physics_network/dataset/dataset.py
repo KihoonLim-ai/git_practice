@@ -2,7 +2,7 @@ import os
 import torch
 import numpy as np
 from torch.utils.data import Dataset
-from config_param import ConfigParam as Config
+from dataset.config_param import ConfigParam as Config
 
 # 사용자가 업로드한 physics_utils 활용
 from dataset.physics_utils import calc_wind_profile_power_law
@@ -58,9 +58,9 @@ class AermodDataset(Dataset):
         
         # [데이터셋 내부 정규화]
         # process_met.py에서 저장한 최대값으로 나눔
-        met_seq[:, 0] /= self.scale_wind
-        met_seq[:, 1] /= self.scale_wind
-        met_seq[:, 2] /= self.scale_L
+        # met_seq[:, 0] /= self.scale_wind
+        # met_seq[:, 1] /= self.scale_wind
+        # met_seq[:, 2] /= self.scale_L
 
         # ------------------------------------------------
         # 3. Decoder Query (4D Coordinates)
@@ -74,7 +74,11 @@ class AermodDataset(Dataset):
         # ------------------------------------------------
         # A. Wind GT (Physics) - Raw 값 사용
         target_met = self.met[future_idx] # (4,)
-        u_ref, v_ref, L_val = target_met[0], target_met[1], target_met[2]
+        
+        # Power Law 계산 공식은 m/s 단위가 들어가야 정확한 프로파일을 만듭니다.
+        u_ref = target_met[0] * self.scale_wind
+        v_ref = target_met[1] * self.scale_wind
+        L_val = target_met[2] * self.scale_L
         
         # 물리 계산을 위해 좌표를 미터 단위로 복원
         z_real_m = self.coords_3d[:, 2] * Config.MAX_Z
@@ -85,6 +89,11 @@ class AermodDataset(Dataset):
             slopes=(self.slope_flat[:, 0], self.slope_flat[:, 1])
         ) # (N, 3)
 
+        wind_field[:, 0] /= self.scale_wind
+        wind_field[:, 1] /= self.scale_wind
+        # Z축 속도(w)는 보통 작으므로 scale_wind로 같이 나눠도 무방
+        wind_field[:, 2] /= self.scale_wind
+        
         # B. Conc GT (Label) - 이미 Log+Norm 되어 있음
         c_vol = self.conc[future_idx] # (NY, NX, NZ)
         c_flat = c_vol.flatten()      # (N,)
