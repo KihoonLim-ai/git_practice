@@ -1,4 +1,5 @@
 import os
+import sys
 import random
 import numpy as np
 import torch
@@ -10,14 +11,22 @@ from tqdm import tqdm
 import wandb
 import gc
 
+current_dir = os.path.dirname(os.path.abspath(__file__))
+
+parent_dir = os.path.dirname(current_dir)
+
+sys.path.append(parent_dir)
+
 # [사용자 모듈]
 from dataset.dataset import get_time_split_datasets
 from dataset.config_param import ConfigParam as Config
 from model import ST_TransformerDeepONet
 
+
 # --- 1. Fully Parameterized Loss Function ---
 class PhysicsInformedLoss(nn.Module):
-    def __init__(self, w_conc=1.0, w_wind=1.0, topk_ratio=0.05, conc_weight_scale=10.0):
+    # [수정] conc_weight_scale 기본값을 4.0으로 변경 (너무 크면 배경이 망가짐)
+    def __init__(self, w_conc=10.0, w_wind=1.0, topk_ratio=0.05, conc_weight_scale=4.0):
         super().__init__()
         self.w_conc = w_conc
         self.w_wind = w_wind
@@ -28,16 +37,16 @@ class PhysicsInformedLoss(nn.Module):
     def forward(self, pred_w, true_w, pred_c, true_c):
         # 1. Concentration Loss (Weighted + Sniper)
         
-        # [핵심 수정] 가중치 계산 안전장치
-        # true_c는 Z-score라 음수가 될 수 있음.
-        # F.softplus를 통과시켜 음수를 0 근처로, 양수를 그대로 양수로 만듦.
-        # 예: -3 -> 0.05 (가중치 ~1), +3 -> 3.0 (가중치 높음)
+        # [다시 켜기] 가중치 적용 (Softplus로 안전하게)
+        # true_c가 음수일 때도 softplus는 0에 가까운 양수를 반환하므로 안전함
         safe_conc = F.softplus(true_c) 
         weights = 1.0 + self.conc_weight_scale * safe_conc
         
+        # 픽셀별 MSE에 가중치 곱하기
         pixel_loss = self.mse(pred_c, true_c) * weights
         
-        # Sniper Loss
+        # Sniper Loss (상위 k%만 학습)
+        # 배경(0)이 너무 많으므로, 오차가 큰 상위 5%만 골라내서 집중 타격
         k = int(pixel_loss.numel() * self.topk_ratio)
         if k < 1: k = 1
         topk_loss, _ = torch.topk(pixel_loss.view(-1), k)
@@ -50,8 +59,10 @@ class PhysicsInformedLoss(nn.Module):
         
         loss_w = loss_w_vec + loss_w_dir
 
+        # 최종 Loss 합산
+        # w_conc를 10.0 정도로 높게 주어, 농도 학습을 최우선으로 함
         return (self.w_conc * loss_c) + (self.w_wind * loss_w), loss_c, loss_w
-
+    
 # --- 2. Seed Setting ---
 def seed_everything(seed):
     random.seed(seed)
@@ -114,7 +125,13 @@ def train(config=None):
             pct_start=config.warmup_ratio, # Warm-up 비율 튜닝
             anneal_strategy='cos'
         )
-
+        
+        best_val_loss = float('inf') # 최고 성능 기록용 (초기값: 무한대)
+        
+        # 저장 경로 생성
+        save_dir = os.path.join(current_dir, 'checkpoints')
+        os.makedirs(save_dir, exist_ok=True)
+        
         # --- Loop ---
         for epoch in range(config.epochs):
             model.train()
@@ -175,8 +192,22 @@ def train(config=None):
             })
             
             # Checkpoint (Best Model Only)
-            # Sweep 중에는 디스크 용량 문제로 Best만 저장하거나 생략하기도 함
-            # 여기서는 생략하거나 필요시 추가
+            if avg_val < best_val_loss:
+                best_val_loss = avg_val
+                
+                # 파일명에 run 이름을 넣어서 덮어쓰기 방지 (예: model_sweep-1_best.pth)
+                ckpt_name = f"model_{run.name}_best.pth"
+                ckpt_path = os.path.join(save_dir, ckpt_name)
+                
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'loss': best_val_loss,
+                    'config': dict(config), # 설정값도 같이 저장하면 나중에 편함
+                }, ckpt_path)
+                
+                print(f"  -> New Best Model Saved! (Val Loss: {best_val_loss:.4f})")
 
 # --- 4. Sweep Configuration ---
 if __name__ == "__main__":
@@ -189,7 +220,7 @@ if __name__ == "__main__":
         'parameters': {
             # [1] Training Dynamics
             'epochs': {'value': 100}, # 고정 (비교를 위해)
-            'batch_size': {'values': [32, 64]},
+            'batch_size': {'values': [16, 32]},
             'lr': {'distribution': 'log_uniform_values', 'min': 1e-4, 'max': 1e-3},
             'weight_decay': {'values': [1e-4, 1e-3, 5e-3]},
             'warmup_ratio': {'values': [0.1, 0.2]}, # Warm-up 길이 조절
@@ -198,8 +229,8 @@ if __name__ == "__main__":
             # [2] Loss Function Tuning (핵심)
             'w_conc': {'values': [1.0, 2.0]}, # 농도 Loss 중요도
             'w_wind': {'values': [1.0, 0.5]}, # 바람 Loss 중요도
-            'topk_ratio': {'values': [0.05, 0.1, 0.2]}, # Sniper 범위 (5%, 10%, 20%)
-            'conc_weight_scale': {'values': [5.0, 10.0, 20.0]}, # 고농도 가중치 (1 + alpha*y)
+            'topk_ratio': {'values': [0.5, 1.0]}, # Sniper 범위 (5%, 10%, 20%)
+            'conc_weight_scale': {'values': [1.0, 2.0]}, # 고농도 가중치 (1 + alpha*y)
 
             # [3] Model Architecture Tuning
             # model.py가 이 인자들을 받아야 적용됨

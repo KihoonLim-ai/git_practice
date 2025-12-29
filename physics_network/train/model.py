@@ -1,6 +1,22 @@
 import torch
 import torch.nn as nn
 
+# [1] 푸리에 임베딩 레이어 추가
+class GaussianFourierFeatureTransform(nn.Module):
+    def __init__(self, input_dim, mapping_size=256, scale=10.0):
+        super().__init__()
+        self._input_dim = input_dim
+        self._mapping_size = mapping_size
+        # 학습되지 않는 고정된 랜덤 가중치 (B)
+        self.register_buffer('B', torch.randn(input_dim, mapping_size) * scale)
+
+    def forward(self, x):
+        # x: (Batch, input_dim)
+        # Projection: (2 * pi * x) @ B
+        x_proj = (2.0 * np.pi * x) @ self.B
+        # sin, cos을 붙여서 차원을 2배로 뻥튀기
+        return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
+    
 class ConvBranch(nn.Module):
     """ [Map Encoder] latent_dim 인자 추가 """
     def __init__(self, in_channels=3, latent_dim=128):
@@ -39,18 +55,41 @@ class TransformerObsBranch(nn.Module):
         return self.fc_out(x.mean(dim=1))
 
 class SpatioTemporalTrunk(nn.Module):
-    """ [Trunk] Hyperparams 인자 추가 """
-    def __init__(self, input_dim=4, latent_dim=128, dropout=0.1):
+    def __init__(self, input_dim=4, latent_dim=128, dropout=0.1): 
         super().__init__()
+        
+        # 푸리에 피처 설정
+        # mapping_size가 128이면, sin/cos 합쳐서 출력은 256차원이 됨
+        self.fourier_dim = 256 
+        self.fourier_mapping = GaussianFourierFeatureTransform(
+            input_dim, 
+            mapping_size=self.fourier_dim // 2, 
+            scale=10.0 # scale이 클수록 고주파(세밀한 변화)를 잘 잡음
+        )
+        
+        # 첫 번째 레이어의 입력 차원이 '4'가 아니라 '256'으로 변경됨
         self.net = nn.Sequential(
-            nn.Linear(input_dim, 128), nn.Tanh(), nn.Dropout(dropout),
-            nn.Linear(128, 128), nn.Tanh(), nn.Dropout(dropout),
-            nn.Linear(128, 128), nn.Tanh(), nn.Dropout(dropout),
-            nn.Linear(128, latent_dim), nn.Tanh()
+            nn.Linear(self.fourier_dim, 128), # <--- 여기가 핵심 변경점
+            nn.Tanh(), 
+            nn.Dropout(dropout),
+            
+            nn.Linear(128, 128), 
+            nn.Tanh(), 
+            nn.Dropout(dropout),
+            
+            nn.Linear(128, 128), 
+            nn.Tanh(), 
+            nn.Dropout(dropout),
+            
+            nn.Linear(128, latent_dim), 
+            nn.Tanh()
         )
 
     def forward(self, x):
-        return self.net(x)
+        # 1. 좌표(x,y,z,t)를 먼저 푸리에 공간으로 매핑
+        x_embed = self.fourier_mapping(x) 
+        # 2. 매핑된 고차원 벡터를 MLP에 통과
+        return self.net(x_embed)
 
 class ST_TransformerDeepONet(nn.Module):
     """
