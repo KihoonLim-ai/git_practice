@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import numpy as np
 
 # [1] 푸리에 임베딩 레이어 추가
 class GaussianFourierFeatureTransform(nn.Module):
