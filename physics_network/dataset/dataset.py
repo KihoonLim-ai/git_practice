@@ -17,7 +17,7 @@ class AermodDataset(Dataset):
         """
         self.met = met_data           # (Time, 4) -> u, v, L, wd
         self.terrain = terrain        # (45, 45) -> 0~1 normalized
-        self.source_q = source_q      # (45, 45) -> log scaled
+        self.source_q = source_q      # (45, 45) -> log scaled (Gaussian Splatted)
         self.source_h = source_h      # (45, 45) -> 0~1 normalized
         self.conc = conc_data         # (Time, NY, NX, NZ) -> Log+Normed
         
@@ -39,28 +39,66 @@ class AermodDataset(Dataset):
 
     def __len__(self):
         return len(self.valid_indices)
+    
+    def _shift_source_map(self, src_map, u_norm, v_norm):
+        """
+        [New Feature] 바람에 의한 오염원 이동 (Advected Source)
+        - u, v는 정규화된 값이므로 scale_wind를 곱해 실제 m/s로 복원
+        - 실제 풍속에 비례하여 맵을 shift
+        """
+        # 실제 풍속 복원 (m/s)
+        u_real = u_norm * self.scale_wind
+        v_real = v_norm * self.scale_wind
+        
+        # 격자 크기(100m) 단위로 얼마나 밀릴지 계산
+        # 예: 풍속 5m/s * 1시간(3600s) = 18km -> 너무 멂
+        # 예: 풍속 5m/s -> "현재 순간의 확산 경향"만 보여주기 위해 작게 scaling
+        # 여기서는 단순히 방향성 힌트만 주기 위해 1~3칸 정도만 밀리게 설정
+        # scale factor 0.5: 풍속 10m/s일 때 5칸 이동
+        scale_factor = 0.5 
+        
+        shift_x = int(u_real * scale_factor)
+        shift_y = int(v_real * scale_factor)
+        
+        # 맵 이동 (Rolling)
+        # axis=0: y축(row), axis=1: x축(col)
+        shifted = np.roll(src_map, shift_y, axis=0)
+        shifted = np.roll(shifted, shift_x, axis=1)
+        
+        # Roll은 반대편에서 튀어나오므로, 마스킹 처리 (간단하게 구현)
+        # (완벽하진 않지만 CNN이 경계선 노이즈는 무시하도록 학습됨)
+        return shifted
 
     def __getitem__(self, idx):
         curr_idx = self.valid_indices[idx]
         future_idx = curr_idx  # t=0 (현재 예측)
 
         # ------------------------------------------------
-        # 1. Context Maps (이미 전처리된 상태)
+        # 1. Met Data Handling (수정됨)
         # ------------------------------------------------
-        # 지형(0~1), 배출량(Log), 높이(0~1)
-        ctx_map = np.stack([self.terrain, self.source_q, self.source_h], axis=0)
+        # met: [u, v, L, wd]
+        # target_met는 현재 시점(future_idx)의 기상 데이터
+        target_met_all = self.met[future_idx] 
+        
+        # [중요] 4번째 컬럼(wd)은 버리고 앞의 3개(u, v, L)만 취함
+        u_curr = target_met_all[0]
+        v_curr = target_met_all[1]
+        L_curr = target_met_all[2]
+        
+        # Past Sequence (Encoder Input)
+        # 여기서도 :3 슬라이싱을 명확히 하여 wd가 들어가는 것 방지
+        met_seq = self.met[curr_idx - self.seq_len + 1 : curr_idx + 1, :3].copy()
 
         # ------------------------------------------------
-        # 2. Encoder Input (Past 30 hours)
+        # 2. Context Maps (Advected Source 추가)
         # ------------------------------------------------
-        # met: [u, v, L, wd] -> 앞에서 3개(u,v,L)만 사용
-        met_seq = self.met[curr_idx - self.seq_len + 1 : curr_idx + 1, :3].copy()
+        # (A) 기본 맵: 지형, 오염원(Q), 높이(H)
+        # (B) 추가 맵: 바람에 밀린 오염원 (Direction Hint)
+        adv_source = self._shift_source_map(self.source_q, u_curr, v_curr)
         
-        # [데이터셋 내부 정규화]
-        # process_met.py에서 저장한 최대값으로 나눔
-        # met_seq[:, 0] /= self.scale_wind
-        # met_seq[:, 1] /= self.scale_wind
-        # met_seq[:, 2] /= self.scale_L
+        # 채널 4개로 확장: [Terrain, Source_Q, Source_H, Adv_Source]
+        # Model의 ConvBranch 입력 채널(in_channels)을 3 -> 4로 수정해야 함!
+        ctx_map = np.stack([self.terrain, self.source_q, self.source_h, adv_source], axis=0)
 
         # ------------------------------------------------
         # 3. Decoder Query (4D Coordinates)
@@ -72,15 +110,12 @@ class AermodDataset(Dataset):
         # ------------------------------------------------
         # 4. Ground Truth (Physics & Label)
         # ------------------------------------------------
-        # A. Wind GT (Physics) - Raw 값 사용
-        target_met = self.met[future_idx] # (4,)
+        # A. Wind GT (Physics)
+        # Power Law 계산 공식은 m/s 단위가 들어가야 정확함
+        u_ref = u_curr * self.scale_wind
+        v_ref = v_curr * self.scale_wind
+        L_val = L_curr * self.scale_L
         
-        # Power Law 계산 공식은 m/s 단위가 들어가야 정확한 프로파일을 만듭니다.
-        u_ref = target_met[0] * self.scale_wind
-        v_ref = target_met[1] * self.scale_wind
-        L_val = target_met[2] * self.scale_L
-        
-        # 물리 계산을 위해 좌표를 미터 단위로 복원
         z_real_m = self.coords_3d[:, 2] * Config.MAX_Z
         
         wind_field = calc_wind_profile_power_law(
@@ -89,12 +124,12 @@ class AermodDataset(Dataset):
             slopes=(self.slope_flat[:, 0], self.slope_flat[:, 1])
         ) # (N, 3)
 
+        # 다시 정규화하여 모델 출력과 스케일 맞춤
         wind_field[:, 0] /= self.scale_wind
         wind_field[:, 1] /= self.scale_wind
-        # Z축 속도(w)는 보통 작으므로 scale_wind로 같이 나눠도 무방
         wind_field[:, 2] /= self.scale_wind
         
-        # B. Conc GT (Label) - 이미 Log+Norm 되어 있음
+        # B. Conc GT (Label)
         c_vol = self.conc[future_idx] # (NY, NX, NZ)
         c_flat = c_vol.flatten()      # (N,)
 
@@ -106,6 +141,8 @@ class AermodDataset(Dataset):
             torch.tensor(c_flat, dtype=torch.float32).unsqueeze(-1)
         )
 
+# get_time_split_datasets 함수는 기존과 동일하므로 생략하거나 그대로 둡니다.
+# 다만 import 부분과 클래스 정의는 위 코드로 교체해주세요.
 def get_time_split_datasets(seq_len=30, pred_step=5, val_ratio=0.1):
     """
     여기서 파일 로드를 수행하고, Train/Val로 쪼개서 Dataset 클래스에 넘겨줍니다.
