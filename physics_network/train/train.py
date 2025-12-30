@@ -75,31 +75,22 @@ def seed_everything(seed):
 
 # --- 3. Training Loop ---
 def train(config=None):
-    # WandB 초기화
     with wandb.init(config=config) as run:
         config = wandb.config
-        
-        # 시드 고정 (재현성)
         seed_everything(config.seed if hasattr(config, 'seed') else 42)
         DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Data Setup (전체 데이터 사용)
         train_ds, val_ds, _ = get_time_split_datasets(seq_len=30, pred_step=5)
         
         train_loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True, num_workers=4, pin_memory=True)
         val_loader = DataLoader(val_ds, batch_size=config.batch_size, shuffle=False, num_workers=4, pin_memory=True)
         
-        # Model Setup 
-        # [주의] model.py의 ST_TransformerDeepONet이 인자를 받도록 수정되어 있어야 함
-        # 수정되지 않았다면 기본값으로 동작하지만, 튜닝을 위해 인자 전달 권장
-        try:
-            model = ST_TransformerDeepONet(
-                latent_dim=config.latent_dim,
-                dropout=config.dropout
-            ).to(DEVICE)
-        except TypeError:
-            print("⚠️ Warning: Model does not accept arguments. Using default architecture.")
-            model = ST_TransformerDeepONet().to(DEVICE)
+        # [수정] 모델 생성 시 fourier_scale 전달
+        model = ST_TransformerDeepONet(
+            latent_dim=config.latent_dim,
+            dropout=config.dropout,
+            fourier_scale=config.fourier_scale # WandB에서 받음
+        ).to(DEVICE)
 
         # Loss Setup
         criterion = PhysicsInformedLoss(
@@ -219,26 +210,31 @@ if __name__ == "__main__":
         },
         'parameters': {
             # [1] Training Dynamics
-            'epochs': {'value': 100}, # 고정 (비교를 위해)
-            'batch_size': {'values': [16, 32]},
+            'epochs': {'value': 200}, # 고정 (비교를 위해)
+            'batch_size': {'values': [32]},
             'lr': {'distribution': 'log_uniform_values', 'min': 1e-4, 'max': 1e-3},
-            'weight_decay': {'values': [1e-4, 1e-3, 5e-3]},
-            'warmup_ratio': {'values': [0.1, 0.2]}, # Warm-up 길이 조절
+            'weight_decay': {'values': [1e-4]},
+            'warmup_ratio': {'values': [0.1]}, # Warm-up 길이 조절
             'seed': {'value': 42},
 
             # [2] Loss Function Tuning (핵심)
-            'w_conc': {'values': [1.0, 2.0]}, # 농도 Loss 중요도
-            'w_wind': {'values': [1.0, 0.5]}, # 바람 Loss 중요도
-            'topk_ratio': {'values': [0.5, 1.0]}, # Sniper 범위 (5%, 10%, 20%)
-            'conc_weight_scale': {'values': [1.0, 2.0]}, # 고농도 가중치 (1 + alpha*y)
+            'w_conc': {'values': [2.0]}, # 농도 Loss 중요도
+            'w_wind': {'values': [1.0]}, # 바람 Loss 중요도
+            'topk_ratio': {'values': [0.2]}, # Sniper 범위 (5%, 10%, 20%)
+            'conc_weight_scale': {'values': [10.0]}, # 고농도 가중치 (1 + alpha*y)
 
             # [3] Model Architecture Tuning
             # model.py가 이 인자들을 받아야 적용됨
-            'latent_dim': {'values': [128, 256]}, 
-            'dropout': {'values': [0.1, 0.2, 0.3]} 
+            'latent_dim': {'values': [128]}, 
+            'dropout': {'values': [0.1]}, 
+
+            # [4] Fourier Features (새로 추가됨)
+            # scale이 클수록 고주파(급격한 변화, 피크)를 잘 잡습니다.
+            # 10.0은 부드러운 편이고, 30.0~50.0은 되어야 피크가 섭니다.
+            'fourier_scale': {'values': [10.0]} 
         }
     }
     
     # 프로젝트 이름 수정 필요
-    sweep_id = wandb.sweep(sweep_config, entity="jhlee98", project="UAS_Final_Paper1_Sweep")
-    wandb.agent(sweep_id, function=train, count=20) # 20번의 실험 수행
+    sweep_id = wandb.sweep(sweep_config, entity="jhlee98", project="kari_onestop_uas_fourier")
+    wandb.agent(sweep_id, function=train, count=1) # 20번의 실험 수행
