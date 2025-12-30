@@ -17,10 +17,55 @@ from model import ST_TransformerDeepONet
 # ==========================================
 # 설정
 # ==========================================
-CHECKPOINT_PATH = "./train/checkpoints/model_fearless-sweep-1_best.pth"
-MIN_CONC_THRESHOLD = 50.0  # 이 값 이상인 농도가 있는 샘플만 찾음 (ppm)
+CHECKPOINT_PATH = "./train/checkpoints/model_confused-sweep-1_best.pth"
+MIN_CONC_THRESHOLD = 100.0  # 이 값 이상인 농도가 있는 샘플만 찾음 (ppm)
 VIS_W_SCALE = 15.0         # Side View에서 수직풍(W) 화살표 크기 증폭 배수
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+def find_best_plume_sample(dataset):
+    """
+    단순 최대 농도가 아니라, '연기가 넓고 길게 퍼진(High Coverage)' 샘플을 찾습니다.
+    바람에 의한 확산 패턴이 가장 잘 보이는 데이터를 골라냅니다.
+    """
+    print("🔍 Searching for the best plume sample (High Concentration + Wide Spread)...")
+    
+    best_idx = 0
+    best_score = -1.0
+    
+    # 전체 데이터셋 순회 (시간이 걸릴 수 있으므로 10%만 샘플링하거나, 전체를 돌림)
+    # 여기서는 전체를 빠르게 훑는 로직
+    for i in range(len(dataset)):
+        _, _, _, _, c_norm = dataset[i] # c_norm: (N_points, 1)
+        
+        # 1. 텐서 -> 넘파이 변환 (CPU 연산)
+        c_val = c_norm.numpy().flatten()
+        
+        # 2. 복원 없이 Z-score 상태에서 빠르게 판단 (속도 최적화)
+        # Z-score > 1.0 이면 대략 상위 16% (유의미한 농도)
+        # Z-score > 3.0 이면 대략 상위 0.1% (고농도 피크)
+        
+        # 조건 A: 고농도 피크가 존재해야 함 (뚜렷함)
+        max_val = c_val.max()
+        if max_val < 3.0: # 약 평균+3표준편차 미만이면 패스 (너무 연함)
+            continue
+            
+        # 조건 B: 유의미한 농도(Z > 0.5)를 가진 격자점의 개수 (넓이)
+        spread_count = np.sum(c_val > 0.5)
+        
+        # 점수 산정: 피크 높이보다 '얼마나 넓게 퍼졌나'에 가중치
+        # Score = (확산 면적) * (최대 농도 로그) 
+        # -> 면적이 넓을수록 점수가 크게 오름
+        score = spread_count * np.log1p(max_val)
+        
+        if score > best_score:
+            best_score = score
+            best_idx = i
+            
+            # 진행 상황 모니터링 (옵션)
+            # print(f"  -> New Best Candidate: Idx {i} (Spread: {spread_count} pts, Max Z: {max_val:.2f})")
+
+    print(f"✅ Best Sample Found: Index {best_idx} (Score: {best_score:.2f})")
+    return best_idx
 
 def find_high_concentration_sample(dataset):
     """
@@ -59,7 +104,7 @@ def visualize_comparison():
     _, val_ds, _ = get_time_split_datasets(seq_len=30, pred_step=5)
     
     # 2. 유의미한 샘플 찾기
-    target_idx = find_high_concentration_sample(val_ds)
+    target_idx = find_best_plume_sample(val_ds)
     
     # 3. 모델 로드
     if not os.path.exists(CHECKPOINT_PATH):

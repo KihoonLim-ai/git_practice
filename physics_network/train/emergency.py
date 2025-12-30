@@ -13,7 +13,7 @@ from dataset.dataset import get_time_split_datasets
 from model import ST_TransformerDeepONet
 
 # 설정
-CHECKPOINT_PATH = "./train/checkpoints/model_fearless-sweep-1_best.pth"
+CHECKPOINT_PATH = "./train/checkpoints/model_graceful-sweep-1_best.pth"
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def check_raw_stats():

@@ -18,7 +18,7 @@ from model import ST_TransformerDeepONet
 # ==========================================
 # 설정
 # ==========================================
-CHECKPOINT_PATH = "./train/checkpoints/model_fearless-sweep-1_best.pth"
+CHECKPOINT_PATH = "./train/checkpoints/model_soft-sweep-1_best.pth"
 TARGET_TIME_IDX = 50   # 보고 싶은 시간대
 THRESHOLD_CONC = 10.0  # 시각화할 최소 농도 (이 값 이상만 3D로 찍음)
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

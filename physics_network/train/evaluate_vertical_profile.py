@@ -19,7 +19,7 @@ from model import ST_TransformerDeepONet
 # ==========================================
 # 설정
 # ==========================================
-CHECKPOINT_PATH = "./train/checkpoints/model_fearless-sweep-1_best.pth"
+CHECKPOINT_PATH = "./train/checkpoints/model_confused-sweep-1_best.pth"
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def evaluate_vertical():

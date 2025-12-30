@@ -18,7 +18,7 @@ from model import ST_TransformerDeepONet
 # ==========================================
 # 설정
 # ==========================================
-CHECKPOINT_PATH = "./train/checkpoints/model_fearless-sweep-1_best.pth"
+CHECKPOINT_PATH = "./train/checkpoints/model_graceful-sweep-1_best.pth"
 TARGET_TIME_IDX = 50   # 확인하고 싶은 시간대
 TARGET_Z_IDX = 1       # 보고 싶은 고도 층 (예: 1=10m, 4=40m)
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
