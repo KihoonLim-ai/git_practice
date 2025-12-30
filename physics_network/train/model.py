@@ -4,18 +4,15 @@ import numpy as np
 
 # [1] 푸리에 임베딩 레이어 추가
 class GaussianFourierFeatureTransform(nn.Module):
+    # [수정] scale 인자 받도록 변경
     def __init__(self, input_dim, mapping_size=256, scale=10.0):
         super().__init__()
         self._input_dim = input_dim
         self._mapping_size = mapping_size
-        # 학습되지 않는 고정된 랜덤 가중치 (B)
         self.register_buffer('B', torch.randn(input_dim, mapping_size) * scale)
 
     def forward(self, x):
-        # x: (Batch, input_dim)
-        # Projection: (2 * pi * x) @ B
         x_proj = (2.0 * np.pi * x) @ self.B
-        # sin, cos을 붙여서 차원을 2배로 뻥튀기
         return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
     
 class ConvBranch(nn.Module):
@@ -56,56 +53,46 @@ class TransformerObsBranch(nn.Module):
         return self.fc_out(x.mean(dim=1))
 
 class SpatioTemporalTrunk(nn.Module):
-    def __init__(self, input_dim=4, latent_dim=128, dropout=0.1): 
+    # [수정] fourier_scale 인자 추가
+    def __init__(self, input_dim=4, latent_dim=128, dropout=0.1, fourier_scale=10.0): 
         super().__init__()
         
-        # 푸리에 피처 설정
-        # mapping_size가 128이면, sin/cos 합쳐서 출력은 256차원이 됨
         self.fourier_dim = 256 
         self.fourier_mapping = GaussianFourierFeatureTransform(
             input_dim, 
             mapping_size=self.fourier_dim // 2, 
-            scale=10.0 # scale이 클수록 고주파(세밀한 변화)를 잘 잡음
+            scale=fourier_scale # [핵심] 외부에서 받은 scale 적용
         )
         
-        # 첫 번째 레이어의 입력 차원이 '4'가 아니라 '256'으로 변경됨
         self.net = nn.Sequential(
-            nn.Linear(self.fourier_dim, 128), # <--- 여기가 핵심 변경점
+            nn.Linear(self.fourier_dim, 128),
             nn.Tanh(), 
             nn.Dropout(dropout),
-            
             nn.Linear(128, 128), 
             nn.Tanh(), 
             nn.Dropout(dropout),
-            
             nn.Linear(128, 128), 
             nn.Tanh(), 
             nn.Dropout(dropout),
-            
             nn.Linear(128, latent_dim), 
             nn.Tanh()
         )
 
     def forward(self, x):
-        # 1. 좌표(x,y,z,t)를 먼저 푸리에 공간으로 매핑
         x_embed = self.fourier_mapping(x) 
-        # 2. 매핑된 고차원 벡터를 MLP에 통과
         return self.net(x_embed)
 
 class ST_TransformerDeepONet(nn.Module):
-    """
-    [Final Model] 
-    수정사항: 
-    1. __init__에 latent_dim, dropout 인자 추가 (Sweep용)
-    2. head_conc에서 Softplus 제거 (Z-score 음수 예측 허용)
-    """
-    def __init__(self, latent_dim=128, dropout=0.1, num_heads=4):
+    # [수정] fourier_scale 인자 추가 및 전달
+    def __init__(self, latent_dim=128, dropout=0.1, num_heads=4, fourier_scale=10.0):
         super().__init__()
         self.latent_dim = latent_dim
         
         self.map_encoder = ConvBranch(3, latent_dim)
         self.obs_encoder = TransformerObsBranch(3, latent_dim, num_heads, dropout=dropout)
-        self.trunk = SpatioTemporalTrunk(4, latent_dim, dropout)
+        
+        # [수정] Trunk에 scale 전달
+        self.trunk = SpatioTemporalTrunk(4, latent_dim, dropout, fourier_scale=fourier_scale)
         
         self.fusion = nn.Linear(latent_dim * 2, latent_dim)
         self.dropout = nn.Dropout(dropout)
@@ -114,11 +101,9 @@ class ST_TransformerDeepONet(nn.Module):
             nn.Linear(latent_dim, 64), nn.GELU(),
             nn.Linear(64, 3)
         )
-        
-        # [핵심 수정] Softplus 제거! (Linear Output)
         self.head_conc = nn.Sequential(
             nn.Linear(latent_dim, 64), nn.GELU(),
-            nn.Linear(64, 1) # Identity Activation
+            nn.Linear(64, 1)
         )
 
     def forward(self, ctx_map, obs_seq, query_coords):
