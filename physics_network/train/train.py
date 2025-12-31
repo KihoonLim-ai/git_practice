@@ -9,232 +9,223 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import wandb
-import gc
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
-
 parent_dir = os.path.dirname(current_dir)
-
 sys.path.append(parent_dir)
 
-# [사용자 모듈]
 from dataset.dataset import get_time_split_datasets
 from dataset.config_param import ConfigParam as Config
-from model import ST_TransformerDeepONet
+from model.model import ST_TransformerDeepONet
 
-
-# --- 1. Fully Parameterized Loss Function ---
-class PhysicsInformedLoss(nn.Module):
-    # [수정] conc_weight_scale 기본값을 4.0으로 변경 (너무 크면 배경이 망가짐)
-    def __init__(self, w_conc=10.0, w_wind=1.0, topk_ratio=0.05, conc_weight_scale=4.0):
+# ... (HybridPhysicsLoss 클래스와 get_grid_coords, seed_everything 함수는 기존과 동일) ...
+# (코드 길이상 생략하지만, 실제 파일에는 포함되어야 합니다)
+class HybridPhysicsLoss(nn.Module):
+    # ... (이전과 동일한 내용) ...
+    def __init__(self, w_conc=1.0, w_wind=1.0, lambda_phys=0.5, topk_ratio=0.05, 
+                 dx=100.0, dy=100.0, dz=10.0):
         super().__init__()
         self.w_conc = w_conc
         self.w_wind = w_wind
+        self.lambda_phys = lambda_phys
         self.topk_ratio = topk_ratio
-        self.conc_weight_scale = conc_weight_scale
+        self.dx = dx
+        self.dy = dy
+        self.dz = dz
         self.mse = nn.MSELoss(reduction='none')
 
-    def forward(self, pred_w, true_w, pred_c, true_c):
-        # 1. Concentration Loss (Weighted + Sniper)
+    def calc_divergence(self, u, v, w):
+        du_dx = (u[:, :, :, 2:] - u[:, :, :, :-2]) / (2 * self.dx)
+        dv_dy = (v[:, :, 2:, :] - v[:, :, :-2, :]) / (2 * self.dy)
+        dw_dz = (w[:, 2:, :, :] - w[:, :-2, :, :]) / (2 * self.dz)
+        return du_dx[:, 1:-1, 1:-1, :] + dv_dy[:, 1:-1, :, 1:-1] + dw_dz[:, :, 1:-1, 1:-1]
+
+    def forward(self, pred_wind, target_wind, pred_conc, target_conc):
+        B = pred_wind.shape[0]
+        D, H, W = Config.NZ, Config.NY, Config.NX
         
-        # [다시 켜기] 가중치 적용 (Softplus로 안전하게)
-        # true_c가 음수일 때도 softplus는 0에 가까운 양수를 반환하므로 안전함
-        safe_conc = F.softplus(true_c) 
-        weights = 1.0 + self.conc_weight_scale * safe_conc
-        
-        # 픽셀별 MSE에 가중치 곱하기
-        pixel_loss = self.mse(pred_c, true_c) * weights
-        
-        # Sniper Loss (상위 k%만 학습)
-        # 배경(0)이 너무 많으므로, 오차가 큰 상위 5%만 골라내서 집중 타격
-        k = int(pixel_loss.numel() * self.topk_ratio)
+        u_pred = pred_wind[..., 0].view(B, D, H, W)
+        v_pred = pred_wind[..., 1].view(B, D, H, W)
+        w_pred = pred_wind[..., 2].view(B, D, H, W)
+        c_pred = pred_conc.view(B, D, H, W)
+
+        c_true = target_conc[:, 0]
+        u_true = target_conc[:, 1]
+        v_true = target_conc[:, 2]
+
+        pixel_loss_c = self.mse(c_pred, c_true)
+        pixel_loss_flat = pixel_loss_c.view(-1)
+        k = int(pixel_loss_flat.numel() * self.topk_ratio)
         if k < 1: k = 1
-        topk_loss, _ = torch.topk(pixel_loss.view(-1), k)
-        loss_c = topk_loss.mean()
+        loss_topk, _ = torch.topk(pixel_loss_flat, k)
+        loss_c = (0.7 * loss_topk.mean()) + (0.3 * pixel_loss_flat.mean())
 
-        # 2. Wind Loss (Vector + Direction)
-        loss_w_vec = self.mse(pred_w, true_w).mean()
-        cos_sim = F.cosine_similarity(pred_w, true_w, dim=-1, eps=1e-8)
-        loss_w_dir = (1.0 - cos_sim).mean()
-        
-        loss_w = loss_w_vec + loss_w_dir
+        loss_u = self.mse(u_pred, u_true).mean()
+        loss_v = self.mse(v_pred, v_true).mean()
+        vec_pred_uv = torch.stack([u_pred, v_pred], dim=-1)
+        vec_true_uv = torch.stack([u_true, v_true], dim=-1)
+        cos_sim = F.cosine_similarity(vec_pred_uv, vec_true_uv, dim=-1, eps=1e-8)
+        loss_dir = (1.0 - cos_sim).mean()
+        loss_wind_data = loss_u + loss_v + (0.5 * loss_dir)
 
-        # 최종 Loss 합산
-        # w_conc를 10.0 정도로 높게 주어, 농도 학습을 최우선으로 함
-        return (self.w_conc * loss_c) + (self.w_wind * loss_w), loss_c, loss_w
-    
-# --- 2. Seed Setting ---
+        div = self.calc_divergence(u_pred, v_pred, w_pred)
+        loss_phys = torch.mean(div ** 2)
+
+        total_loss = (self.w_conc * loss_c) + (self.w_wind * loss_wind_data) + (self.lambda_phys * loss_phys)
+        return total_loss, loss_c, loss_wind_data, loss_phys
+
+def get_grid_coords(device):
+    z = torch.linspace(0, 1, Config.NZ)
+    y = torch.linspace(0, 1, Config.NY)
+    x = torch.linspace(0, 1, Config.NX)
+    grid_z, grid_y, grid_x = torch.meshgrid(z, y, x, indexing='ij')
+    coords = torch.stack([grid_x, grid_y, grid_z], dim=-1).reshape(-1, 3).to(device)
+    t = torch.zeros((coords.shape[0], 1), device=device)
+    return torch.cat([coords, t], dim=-1)
+
 def seed_everything(seed):
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
-# --- 3. Training Loop ---
+
+# --- Training Loop ---
 def train(config=None):
-    with wandb.init(config=config) as run:
-        config = wandb.config
-        seed_everything(config.seed if hasattr(config, 'seed') else 42)
+    with wandb.init(config=config, project="kari_pinn_3d_sweep", entity="jhlee98") as run:
+        cfg = wandb.config
+        seed_everything(cfg.seed)
         DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        train_ds, val_ds, _ = get_time_split_datasets(seq_len=30, pred_step=5)
+        # Data
+        train_ds, val_ds, _ = get_time_split_datasets(seq_len=30)
+        train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=4, pin_memory=True)
+        val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=4)
         
-        train_loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True, num_workers=4, pin_memory=True)
-        val_loader = DataLoader(val_ds, batch_size=config.batch_size, shuffle=False, num_workers=4, pin_memory=True)
-        
-        # [수정] 모델 생성 시 fourier_scale 전달
+        # Model
         model = ST_TransformerDeepONet(
-            latent_dim=config.latent_dim,
-            dropout=config.dropout,
-            fourier_scale=config.fourier_scale # WandB에서 받음
+            latent_dim=int(cfg.latent_dim), 
+            dropout=cfg.dropout,
+            fourier_scale=cfg.fourier_scale
         ).to(DEVICE)
+        
+        # Optimizer
+        optimizer = optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=1e-4)
+        
+        # Loss
+        criterion = HybridPhysicsLoss(
+            w_conc=cfg.w_conc,
+            w_wind=cfg.w_wind,
+            lambda_phys=cfg.lambda_phys,
+            topk_ratio=cfg.topk_ratio
+        )
+        
+        grid_coords = get_grid_coords(DEVICE)
+        
+        # [NEW] Best Model Tracking
+        best_val_loss = float('inf')
+        
+        print(f"=== Start Training (Target Phys: {cfg.lambda_phys}) ===")
+        
+        for epoch in range(cfg.epochs):
+            # Curriculum Learning
+            if epoch < 20:
+                criterion.lambda_phys = 0.0
+            
+            elif epoch < 50:
+                criterion.lambda_phys = cfg.lambda_phys* ((epoch - 20) / 30)
+            else:
+                criterion.lambda_phys = cfg.lambda_phys
 
-        # Loss Setup
-        criterion = PhysicsInformedLoss(
-            w_conc=config.w_conc,
-            w_wind=config.w_wind,
-            topk_ratio=config.topk_ratio,
-            conc_weight_scale=config.conc_weight_scale
-        )
-        
-        # Optimizer Setup
-        optimizer = optim.AdamW(
-            model.parameters(), 
-            lr=config.lr, 
-            weight_decay=config.weight_decay
-        )
-        
-        # Scheduler Setup
-        total_steps = len(train_loader) * config.epochs
-        scheduler = optim.lr_scheduler.OneCycleLR(
-            optimizer, 
-            max_lr=config.lr, 
-            total_steps=total_steps, 
-            pct_start=config.warmup_ratio, # Warm-up 비율 튜닝
-            anneal_strategy='cos'
-        )
-        
-        best_val_loss = float('inf') # 최고 성능 기록용 (초기값: 무한대)
-        
-        # 저장 경로 생성
-        save_dir = os.path.join(current_dir, 'checkpoints')
-        os.makedirs(save_dir, exist_ok=True)
-        
-        # --- Loop ---
-        for epoch in range(config.epochs):
             model.train()
             loop = tqdm(train_loader, desc=f"Ep {epoch+1}", leave=False)
             
-            total_loss_avg = 0
-            
             for batch in loop:
-                ctx_map, met_seq, coords_4d, gt_w, gt_c = [b.to(DEVICE) for b in batch]
+                inp_vol, met_seq, target_vol = [b.to(DEVICE) for b in batch]
                 
                 optimizer.zero_grad()
-                pred_w, pred_c = model(ctx_map, met_seq, coords_4d)
+                batch_coords = grid_coords.unsqueeze(0).expand(inp_vol.shape[0], -1, -1)
+                pred_w, pred_c = model(inp_vol, met_seq, batch_coords)
                 
-                loss, l_c, l_w = criterion(pred_w, gt_w, pred_c, gt_c)
+                loss, l_c, l_w, l_p = criterion(pred_w, None, pred_c, target_vol)
                 
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
                 optimizer.step()
-                scheduler.step()
                 
-                total_loss_avg += loss.item()
-                loop.set_postfix(loss=loss.item())
-                
-                # Step-wise Logging
+                loop.set_postfix(loss=loss.item(), phys=l_p.item())
                 wandb.log({
-                    "train_loss": loss.item(), 
-                    "train_conc_loss": l_c.item(),
-                    "train_wind_loss": l_w.item(),
-                    "lr": optimizer.param_groups[0]['lr']
+                    "train_loss": loss.item(),
+                    "loss_conc": l_c.item(),
+                    "loss_wind": l_w.item(),
+                    "loss_phys": l_p.item(),
+                    "curr_lambda_phys": criterion.lambda_phys
                 })
             
-            # Validation
+            # Validation Step
             model.eval()
             val_loss = 0
-            val_c_loss = 0
-            val_w_loss = 0
-            
             with torch.no_grad():
                 for batch in val_loader:
-                    ctx_map, met_seq, coords_4d, gt_w, gt_c = [b.to(DEVICE) for b in batch]
-                    pred_w, pred_c = model(ctx_map, met_seq, coords_4d)
-                    
-                    loss, l_c, l_w = criterion(pred_w, gt_w, pred_c, gt_c)
-                    
-                    val_loss += loss.item()
-                    val_c_loss += l_c.item()
-                    val_w_loss += l_w.item()
+                    inp_vol, met_seq, target_vol = [b.to(DEVICE) for b in batch]
+                    batch_coords = grid_coords.unsqueeze(0).expand(inp_vol.shape[0], -1, -1)
+                    pred_w, pred_c = model(inp_vol, met_seq, batch_coords)
+                    v_loss, _, _, _ = criterion(pred_w, None, pred_c, target_vol)
+                    val_loss += v_loss.item()
             
             avg_val = val_loss / len(val_loader)
-            avg_val_c = val_c_loss / len(val_loader)
-            avg_val_w = val_w_loss / len(val_loader)
+            wandb.log({"epoch": epoch+1, "val_loss": avg_val})
             
-            wandb.log({
-                "epoch": epoch + 1,
-                "val_loss": avg_val,
-                "val_conc_loss": avg_val_c,
-                "val_wind_loss": avg_val_w
-            })
-            
-            # Checkpoint (Best Model Only)
+            # ==========================================================
+            # [NEW] Save Best Model (Config Included)
+            # ==========================================================
             if avg_val < best_val_loss:
                 best_val_loss = avg_val
+                # WandB Run 이름을 사용하여 파일명 중복 방지 (예: best_model_lilac-sweep-1.pth)
+                save_path = f"checkpoints/best_model_{run.name}.pth"
+                os.makedirs("checkpoints", exist_ok=True)
                 
-                # 파일명에 run 이름을 넣어서 덮어쓰기 방지 (예: model_sweep-1_best.pth)
-                ckpt_name = f"model_{run.name}_best.pth"
-                ckpt_path = os.path.join(save_dir, ckpt_name)
-                
-                torch.save({
+                checkpoint = {
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
-                    'loss': best_val_loss,
-                    'config': dict(config), # 설정값도 같이 저장하면 나중에 편함
-                }, ckpt_path)
+                    'config': dict(cfg),  # 설정 정보 저장 (Inference 시 필요)
+                    'best_val_loss': best_val_loss
+                }
                 
-                print(f"  -> New Best Model Saved! (Val Loss: {best_val_loss:.4f})")
+                torch.save(checkpoint, save_path)
+                print(f"  -> Best Model Saved! (Val Loss: {best_val_loss:.4f})")
+                
+            # Periodic Save (Optional)
+            if epoch % 20 == 0 and epoch > 0:
+                # 주기적 저장도 config 포함
+                ckpt_periodic = {
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'config': dict(cfg)
+                }
+                torch.save(ckpt_periodic, f"checkpoints/model_{run.name}_ep{epoch}.pth")
 
-# --- 4. Sweep Configuration ---
 if __name__ == "__main__":
     sweep_config = {
-        'method': 'bayes', # 베이지안 최적화 (성능 좋은 파라미터 탐색)
-        'metric': {
-            'name': 'val_loss', 
-            'goal': 'minimize'
-        },
+        'method': 'bayes',
+        'metric': {'name': 'val_loss', 'goal': 'minimize'},
         'parameters': {
-            # [1] Training Dynamics
-            'epochs': {'value': 200}, # 고정 (비교를 위해)
-            'batch_size': {'values': [32]},
-            'lr': {'distribution': 'log_uniform_values', 'min': 1e-4, 'max': 1e-3},
-            'weight_decay': {'values': [1e-4]},
-            'warmup_ratio': {'values': [0.1]}, # Warm-up 길이 조절
+            'epochs': {'value': 200},
+            'batch_size': {'value': 32},
+            'lr': {'values': [1e-4, 5e-4]},
+            'latent_dim': {'values': [128, 256]},
+            'fourier_scale': {'values': [10.0, 20.0, 30.0]},
+            'dropout': {'values': [0.1, 0.2, 0.3]},
             'seed': {'value': 42},
-
-            # [2] Loss Function Tuning (핵심)
-            'w_conc': {'values': [2.0]}, # 농도 Loss 중요도
-            'w_wind': {'values': [1.0]}, # 바람 Loss 중요도
-            'topk_ratio': {'values': [0.2]}, # Sniper 범위 (5%, 10%, 20%)
-            'conc_weight_scale': {'values': [10.0]}, # 고농도 가중치 (1 + alpha*y)
-
-            # [3] Model Architecture Tuning
-            # model.py가 이 인자들을 받아야 적용됨
-            'latent_dim': {'values': [128]}, 
-            'dropout': {'values': [0.1]}, 
-
-            # [4] Fourier Features (새로 추가됨)
-            # scale이 클수록 고주파(급격한 변화, 피크)를 잘 잡습니다.
-            # 10.0은 부드러운 편이고, 30.0~50.0은 되어야 피크가 섭니다.
-            'fourier_scale': {'values': [10.0]} 
+            'w_conc': {'values': [1.0, 5.0]},
+            'w_wind': {'values': [1.0, 2.0]},
+            'lambda_phys': {'values': [0.1, 0.5]},
+            'topk_ratio': {'values': [0.05, 0.1]},
+            'grad_clip': {'values': [0.05, 0.1, 0.5, 1.0]},
         }
     }
     
-    # 프로젝트 이름 수정 필요
-    sweep_id = wandb.sweep(sweep_config, entity="jhlee98", project="kari_onestop_uas_fourier")
-    wandb.agent(sweep_id, function=train, count=1) # 20번의 실험 수행
+    sweep_id = wandb.sweep(sweep_config, project="kari_pinn_3d_sweep", entity="jhlee98")
+    wandb.agent(sweep_id, function=train, count=10)

@@ -21,47 +21,33 @@ def parse_locations(file_path, sources_dict):
                     sources_dict[sid]['y'] = y
                 except: pass
 
-def add_source_gaussian(grid, center_x, center_y, q_val, sigma=1.0):
-    """
-    [핵심 기능] 오염원 가우시안 스플래팅
-    - 한 점(Pixel)에 꽂히는 Q값을 주변 5x5 영역으로 부드럽게 분산시킴
-    - CNN이 "점"이 아닌 "영역"으로 인식하여 학습 효율 증대
-    - 질량 보존 법칙 적용 (커널 전체 합 = q_val)
-    """
-    # 중심 좌표 (정수형 격자 인덱스)
+def add_source_gaussian(q_grid, h_grid, center_x, center_y, q_val, h_val, sigma=1.0):
+    """오염원 가우시안 스플래팅"""
     cx, cy = int(center_x), int(center_y)
-    
-    # 커널 반경 (radius=2 -> 5x5 영역)
     r = 2
     
-    # 임시 커널 생성
     kernel = np.zeros((2*r+1, 2*r+1), dtype=np.float32)
-    
-    # 가우시안 가중치 계산
     for dy in range(-r, r+1):
         for dx in range(-r, r+1):
             dist_sq = dx**2 + dy**2
             weight = np.exp(-dist_sq / (2 * sigma**2))
             kernel[dy+r, dx+r] = weight
             
-    # 커널 정규화 (전체 합이 1이 되도록 -> 총 배출량 Q 보존)
     if kernel.sum() > 0:
         kernel /= kernel.sum()
         
-    # 그리드에 더하기 (경계 처리 포함)
     for dy in range(-r, r+1):
         for dx in range(-r, r+1):
             ny, nx = cy + dy, cx + dx
-            # 유효한 격자 범위 내에만 값 누적
             if 0 <= ny < Config.NY and 0 <= nx < Config.NX:
-                # 커널 값 * 배출량 Q
-                grid[ny, nx] += q_val * kernel[dy+r, dx+r]
+                q_grid[ny, nx] += q_val * kernel[dy+r, dx+r]
+                h_grid[ny, nx] = max(h_grid[ny, nx], h_val)
 
 def run():
-    print("\n[Step 1] Processing Static Maps (Integrated with Clipping & Gaussian Splatting)...")
+    print("\n[Step 1] Processing Static Maps (Saving RELATIVE coordinates)...")
     
     # -----------------------------------------------------------
-    # 1. Terrain Map (GRIDCART Format)
+    # 1. Terrain Map
     # -----------------------------------------------------------
     t_grid = np.zeros((Config.NY, Config.NX), dtype=np.float32)
     rou_path = os.path.join(Config.RAW_DIR, Config.FILE_ROU)
@@ -97,25 +83,19 @@ def run():
             if points_filled > 0:
                 t_max_val = t_grid.max()
                 print(f"   > Max Terrain Height: {t_max_val:.2f} m")
-                
-                # [지형 정규화] 0~1 scaling
-                if t_max_val > 0: 
-                    t_grid /= t_max_val
-                
-                # [통합된 수정 로직] Clipping (0.0 ~ 1.0 강제)
-                # 데이터 오류나 보간 문제로 인한 이상치 제거
+                if t_max_val > 0: t_grid /= t_max_val
                 t_grid = np.clip(t_grid, 0.0, 1.0)
-                
-                print(f"   -> Terrain processed & Clipped (Min:{t_grid.min():.2f}, Max:{t_grid.max():.2f}).")
                 
         except Exception as e:
             print(f"   ! Terrain Error: {e}")
 
     # -----------------------------------------------------------
-    # 2. Source Maps (Gaussian Splatting 적용)
+    # 2. Source Maps & Raw Metadata (Coordinate Fix)
     # -----------------------------------------------------------
     q_grid = np.zeros((Config.NY, Config.NX), dtype=np.float32)
     h_grid = np.zeros((Config.NY, Config.NX), dtype=np.float32)
+    
+    raw_source_metadata = [] 
     
     inp_path = os.path.join(Config.RAW_DIR, Config.FILE_INP)
     loc_path = os.path.join(Config.RAW_DIR, Config.FILE_SRC_LOC)
@@ -139,49 +119,44 @@ def run():
                     except: pass
 
     cnt = 0
-    skipped = 0
     for sid, data in sources.items():
         if 'x' in data and 'y' in data:
-            # 좌표 변환 (UTM -> Grid Index)
-            # xy_to_grid 함수는 정수형 튜플 혹은 None 반환
+            # xy_to_grid: 절대좌표 -> 그리드 인덱스 (0~44)
             idx = xy_to_grid(data['x'], data['y'])
             
             if idx:
                 q_val = data.get('q', 1.0)
                 h_val = data.get('h', 10.0)
                 
-                # [수정됨] 단순 대입 대신 가우시안 스플래팅 함수 호출
-                # q_grid[idx] += q_val  <-- 기존 방식 (삭제됨)
-                add_source_gaussian(q_grid, idx[1], idx[0], q_val, sigma=1.0)
+                # 1. 모델용 Map 생성
+                add_source_gaussian(q_grid, h_grid, idx[0], idx[1], q_val, h_val, sigma=1.0)
                 
-                # 높이(h)는 물리적으로 점(Point)이므로 Max Pooling 방식 유지
-                # (주변으로 퍼지는 성질의 데이터가 아님)
-                h_grid[idx] = max(h_grid[idx], h_val)
+                # 2. [수정됨] 가시화용 좌표 저장 (Absolute -> Relative)
+                # 절대 좌표를 저장하면 4,000,000 같이 큰 값이 저장되어 그래프가 망가짐
+                # 그리드 인덱스를 다시 미터 단위(Relative)로 변환하여 저장
                 
+                rel_x = float(idx[0]) * Config.DX # 예: 10 * 100 = 1000.0m
+                rel_y = float(idx[1]) * Config.DY
+                
+                # 이제 rel_x, rel_y는 0 ~ 4500 범위의 값이 됨
+                raw_source_metadata.append([
+                    rel_x,  
+                    rel_y,  
+                    h_val,      
+                    q_val       
+                ])
                 cnt += 1
-            else:
-                skipped += 1
     
-    print(f"   -> Mapped {cnt} sources (Skipped {skipped} outside grid).")
+    print(f"   -> Mapped {cnt} sources (Fixed: Saved as relative coordinates).")
 
-    # -----------------------------------------------------------
-    # [데이터 정규화 및 로그 변환]
-    # -----------------------------------------------------------
-    
-    # 1) 배출량(Q): Log Scale 적용
-    # 가우시안 스플래팅으로 값이 퍼져도, 총량 보존 후 Log를 취하므로 분포가 훨씬 부드러워짐
+    # [데이터 정규화]
     q_grid = np.log1p(q_grid) 
-    print("   -> Applied Log1p scaling to Source Emission (Q)")
-
-    # 2) 굴뚝 높이(H): 0~1 MinMax Scaling
+    
     domain_max_z = Config.MAX_Z
     if domain_max_z > 0:
-        h_grid /= domain_max_z
-    print(f"   -> Applied MinMax scaling to Source Height (H) using max_z={domain_max_z}m")
+        h_grid /= domain_max_z 
 
-    # -----------------------------------------------------------
-    # 3. 저장 (Saving)
-    # -----------------------------------------------------------
+    # 3. 저장
     save_path = os.path.join(Config.PROCESSED_DIR, Config.SAVE_MAPS)
     os.makedirs(Config.PROCESSED_DIR, exist_ok=True)
     
@@ -189,7 +164,8 @@ def run():
                         terrain=t_grid, 
                         source_q=q_grid, 
                         source_h=h_grid,
-                        terrain_max=t_max_val) # 복원용 메타데이터
+                        terrain_max=t_max_val,
+                        raw_sources=np.array(raw_source_metadata, dtype=object))
     
     print(f"   >> Saved integrated maps to {save_path}")
 
