@@ -1,10 +1,18 @@
 import os
+import sys
+
+# 경로 설정
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.append(parent_dir)
+
 import torch
 import numpy as np
 import pandas as pd
 from sklearn.metrics import r2_score, mean_squared_error
 from dataset.dataset import AermodDataset
-from model import RecurrentDeepONet
+# from model import RecurrentDeepONet
+from model.model import ST_TransformerDeepONet
 from dataset.config_param import ConfigParam as Config
 
 # [설정]
@@ -15,7 +23,8 @@ NUM_TESTS = 20  # 요청하신 20회 수행
 
 def main():
     ds = AermodDataset(mode='test', seq_len=BEST_SEQ_LEN)
-    model = RecurrentDeepONet().to(DEVICE)
+    # model = RecurrentDeepONet().to(DEVICE)
+    model = ST_TransformerDeepONet().to(DEVICE)
     ckpt_path = os.path.join("./checkpoints", f"best_model_{BEST_RUN_ID}.pth")
     model.load_state_dict(torch.load(ckpt_path, map_location=DEVICE))
     model.eval()

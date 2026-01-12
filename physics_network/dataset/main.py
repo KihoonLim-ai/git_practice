@@ -6,7 +6,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
-from dataset.config_param import ConfigParam as Config
+from config_param import ConfigParam as Config
 from dataset.process_maps import run as run_maps
 from dataset.process_met import run as run_met
 from dataset.process_labels import run as run_labels

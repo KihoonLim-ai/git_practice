@@ -5,7 +5,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from dataset.config_param import ConfigParam as Config
 
 # [핵심] 공통 물리 함수 사용
-from dataset.physics_utils import calc_wind_profile_power_law
+from physics_utils import calc_wind_profile_power_law
 
 # ==========================================
 # 1. 설정

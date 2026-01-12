@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 from dataset.config_param import ConfigParam as Config
 
 def xy_to_grid(x, y):
@@ -75,3 +76,46 @@ def calc_wind_profile_power_law(uref, vref, L, z_points, z_ref=10.0, slopes=None
     # 6. 최종 병합 (N, 3)
     # u_z, v_z, w_z는 모두 (N,) 형태여야 함
     return np.stack([u_z, v_z, w_z], axis=-1).astype(np.float32)
+
+def make_batch_coords(batch_size, nz, ny, nx, device, time_val=1.0):
+    """
+    배치 크기와 그리드 크기에 맞는 정규화된 (x, y, z, t) 좌표 생성
+    
+    Args:
+        batch_size (int): 배치 크기 (B)
+        nz, ny, nx (int): 그리드 차원 (D, H, W) -> Train시는 32, Val시는 45 등 가변적
+        device (torch.device): GPU/CPU
+        time_val (float): 정규화된 시간 값 (기본 1.0 = 예측 시점)
+        
+    Returns:
+        coords: (B, N, 4) 텐서. 여기서 N = nz * ny * nx
+                순서는 (x, y, z, t)
+    """
+    # 1. 각 축에 대한 1D 좌표 생성 (0 ~ 1 사이로 정규화)
+    # 모델은 "Crop된 윈도우" 안에서의 상대 위치를 학습합니다.
+    x = torch.linspace(0, 1, nx, device=device)
+    y = torch.linspace(0, 1, ny, device=device)
+    z = torch.linspace(0, 1, nz, device=device)
+    
+    # 2. 3D Meshgrid 생성
+    # indexing='ij' 옵션: (z, y, x) 순서대로 그물망을 짬
+    # 결과 shape: (nz, ny, nx)
+    gz, gy, gx = torch.meshgrid(z, y, x, indexing='ij')
+    
+    # 3. Flatten & Stack (N, 3)
+    # Target 데이터가 (B, 1, Z, Y, X) 순서로 되어 있으므로
+    # 좌표도 Z축부터 순회하도록 flatten 해야 매칭이 됩니다.
+    # 하지만 좌표값 자체는 (x, y, z) 순서로 넣어주는 것이 일반적입니다.
+    coords_3d = torch.stack([gx.flatten(), gy.flatten(), gz.flatten()], dim=-1)
+    
+    # 4. 시간(t) 차원 추가 (N, 4)
+    # 모든 좌표점에 대해 동일한 time_val 부여
+    num_points = coords_3d.shape[0]
+    t_col = torch.full((num_points, 1), time_val, device=device)
+    
+    coords_4d = torch.cat([coords_3d, t_col], dim=-1)
+    
+    # 5. 배치 차원 확장 (B, N, 4)
+    batch_coords = coords_4d.unsqueeze(0).expand(batch_size, -1, -1)
+    
+    return batch_coords

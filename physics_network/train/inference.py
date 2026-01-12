@@ -6,7 +6,8 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 # [경로 유지] dataset.dataset
 from dataset.dataset import AermodDataset
-from model import RecurrentDeepONet
+# from model import RecurrentDeepONet
+from model.model import ST_TransformerDeepONet
 from dataset.config_param import ConfigParam as Config
 
 # ==========================================
@@ -106,7 +107,7 @@ def main():
 
     # 1. 데이터셋 로드 (로그 변환된 dataset.py 사용)
     ds = AermodDataset(mode='test', seq_len=BEST_SEQ_LEN)
-    model = RecurrentDeepONet().to(DEVICE)
+    model = ST_TransformerDeepONet().to(DEVICE)
     
     # 2. 모델 로드
     checkpoint = torch.load(ckpt_path, map_location=DEVICE)

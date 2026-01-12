@@ -144,7 +144,7 @@ def run():
     print("\n[Step 2] Processing Met Data (From METEOR.DBG Profile)...")
     
     # 1. 파일 경로 설정
-    met_file_path = os.path.join(Config.RAW_DIR, "met/METEOR.DBG") 
+    met_file_path = os.path.join(Config.RAW_DIR, "met", "METEOR.DBG") 
     
     if not os.path.exists(met_file_path):
         print(f"Error: {met_file_path} not found.")
